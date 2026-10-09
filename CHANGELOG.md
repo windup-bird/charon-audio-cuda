@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased (fork: `windup-bird/charon-audio-cuda`)
+
+### Added
+- CUDA execution provider (`cuda` feature): `ExecutionProvider::Cuda` runs the
+  in-graph HTDemucs export entirely on the NVIDIA GPU (1201/1201 nodes), 9.6x
+  faster per model window than the CPU on an RTX 4050 Laptop. `charon --ep
+  cuda`. See [FORK.md](FORK.md).
+
+### Changed
+- The CUDA session keeps `ConstantFolding` enabled even when the preset
+  disables it: with `OnnxOptions::low_memory()`'s disabled optimizer list, the
+  CUDA EP claims no nodes and the graph runs on the CPU. Only the CUDA path is
+  affected; the CPU path is unchanged.
+- A CUDA session sets `session.disable_cpu_ep_fallback=1`, so a graph the GPU
+  cannot take is an error rather than a silent CPU run.
+
 ## 0.1.2 (2026-09-26)
 
 ### Added

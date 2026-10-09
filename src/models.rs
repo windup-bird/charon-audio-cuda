@@ -75,6 +75,9 @@ pub enum ExecutionProvider {
     /// export; the in-graph-STFT export fails on it
     /// (docs/MEASUREMENTS.md).
     CoreMl,
+    /// CUDA (NVIDIA GPU), with **no CPU fallback**: a node the CUDA EP cannot take fails the
+    /// session instead of silently running on the CPU. Needs the `cuda` feature.
+    Cuda,
     /// CoreML when the feature is enabled and the session builds, else CPU
     #[default]
     Auto,
@@ -313,16 +316,27 @@ impl OnnxModel {
     /// Create new ONNX model
     pub fn new(config: ModelConfig) -> Result<Self> {
         let (session, provider) = match config.onnx.execution_provider {
-            ExecutionProvider::Cpu => (Self::build_session(&config, false)?, "CPU"),
-            ExecutionProvider::CoreMl => (Self::build_session(&config, true)?, "CoreML"),
-            ExecutionProvider::Auto => match Self::build_session(&config, true) {
-                Ok(session) if cfg!(feature = "coreml") => (session, "CoreML"),
-                Ok(session) => (session, "CPU"),
-                Err(e) => {
-                    log::warn!("CoreML session failed ({e}); falling back to CPU");
-                    (Self::build_session(&config, false)?, "CPU")
+            ExecutionProvider::Cpu => {
+                (Self::build_session(&config, ExecutionProvider::Cpu)?, "CPU")
+            }
+            ExecutionProvider::Cuda => (
+                Self::build_session(&config, ExecutionProvider::Cuda)?,
+                "CUDA",
+            ),
+            ExecutionProvider::CoreMl => (
+                Self::build_session(&config, ExecutionProvider::CoreMl)?,
+                "CoreML",
+            ),
+            ExecutionProvider::Auto => {
+                match Self::build_session(&config, ExecutionProvider::CoreMl) {
+                    Ok(session) if cfg!(feature = "coreml") => (session, "CoreML"),
+                    Ok(session) => (session, "CPU"),
+                    Err(e) => {
+                        log::warn!("CoreML session failed ({e}); falling back to CPU");
+                        (Self::build_session(&config, ExecutionProvider::Cpu)?, "CPU")
+                    }
                 }
-            },
+            }
         };
         log::info!("ONNX session on {provider}");
         let stft = match config.contract {
@@ -342,12 +356,12 @@ impl OnnxModel {
         })
     }
 
-    /// Execution provider the session runs on: "CPU" or "CoreML"
+    /// Execution provider the session runs on: `"CPU"`, `"CoreML"` or `"CUDA"`.
     pub fn provider(&self) -> &'static str {
         self.provider
     }
 
-    fn build_session(config: &ModelConfig, coreml: bool) -> Result<Session> {
+    fn build_session(config: &ModelConfig, ep: ExecutionProvider) -> Result<Session> {
         let model_err = |e: ort::Error<_>| CharonError::Model(e.to_string());
         let opts = &config.onnx;
         let threads = opts.intra_threads.unwrap_or_else(|| {
@@ -368,9 +382,29 @@ impl OnnxModel {
             .map_err(model_err)?
             .with_memory_pattern(opts.memory_pattern)
             .map_err(model_err)?;
-        if !opts.disabled_optimizers.is_empty() {
+        // The CUDA execution provider claims **no** nodes at all when `ConstantFolding` is
+        // disabled — measured on HTDemucs: session creation then fails outright under
+        // `disable_cpu_ep_fallback`, and silently runs on the CPU at a ninth of the speed without
+        // it. `OnnxOptions::low_memory()` (which `ModelConfig::htdemucs` inherits) disables it to
+        // cap RAM on the CPU path, so a CUDA session lifts exactly that restriction and keeps any
+        // others the caller asked for.
+        //
+        // The same measurement is why the note on `ModelConfig::htdemucs` that the in-graph STFT
+        // export "only runs on the CPU provider" is not accurate: the export runs entirely on
+        // CUDA, the preset is what stops it.
+        let disabled: Vec<&String> = opts
+            .disabled_optimizers
+            .iter()
+            .filter(|name| ep != ExecutionProvider::Cuda || name.as_str() != "ConstantFolding")
+            .collect();
+        if !disabled.is_empty() {
+            let joined = disabled
+                .iter()
+                .map(|name| name.as_str())
+                .collect::<Vec<_>>()
+                .join(";");
             builder = builder
-                .with_disabled_optimizers(opts.disabled_optimizers.join(";"))
+                .with_disabled_optimizers(joined)
                 .map_err(model_err)?;
         }
         // The CPU EP is always registered last as the fallback; its arena
@@ -378,12 +412,43 @@ impl OnnxModel {
         let cpu = ort::ep::CPU::default()
             .with_arena_allocator(opts.cpu_arena)
             .build();
-        builder = if coreml {
-            Self::with_coreml(builder, config, cpu)?
-        } else {
-            builder.with_execution_providers([cpu]).map_err(model_err)?
+        builder = match ep {
+            ExecutionProvider::CoreMl => Self::with_coreml(builder, config, cpu)?,
+            ExecutionProvider::Cuda => Self::with_cuda(builder)?,
+            // `Auto` reaches here only through the CPU fallback path.
+            ExecutionProvider::Cpu | ExecutionProvider::Auto => {
+                builder.with_execution_providers([cpu]).map_err(model_err)?
+            }
         };
         Ok(builder.commit_from_file(&config.model_path)?)
+    }
+
+    /// CUDA, with the CPU EP's fallback switched off.
+    ///
+    /// Two failure modes have to become errors rather than a slower run: the provider library
+    /// failing to load (no CUDA/cuDNN, or `libonnxruntime_providers_cuda.so` not beside the
+    /// binary) and a node the CUDA EP will not claim. Both are invisible without this setting —
+    /// ONNX Runtime falls back to the CPU and the run is merely slow.
+    #[cfg(feature = "cuda")]
+    fn with_cuda(
+        builder: ort::session::builder::SessionBuilder,
+    ) -> Result<ort::session::builder::SessionBuilder> {
+        let model_err = |e: ort::Error<_>| CharonError::Model(e.to_string());
+        builder
+            .with_config_entry("session.disable_cpu_ep_fallback", "1")
+            .map_err(model_err)?
+            .with_execution_providers([ort::ep::CUDA::default().build()])
+            .map_err(model_err)
+    }
+
+    /// Without the feature, asking for CUDA is a clear error rather than a quiet CPU run.
+    #[cfg(not(feature = "cuda"))]
+    fn with_cuda(
+        _builder: ort::session::builder::SessionBuilder,
+    ) -> Result<ort::session::builder::SessionBuilder> {
+        Err(CharonError::NotSupported(
+            "CUDA execution provider needs the `cuda` feature".to_string(),
+        ))
     }
 
     #[cfg(feature = "coreml")]
@@ -428,6 +493,11 @@ impl OnnxModel {
         if config.onnx.execution_provider == ExecutionProvider::CoreMl {
             return Err(CharonError::NotSupported(
                 "CoreML execution provider needs the `coreml` feature".to_string(),
+            ));
+        }
+        if config.onnx.execution_provider == ExecutionProvider::Cuda {
+            return Err(CharonError::NotSupported(
+                "CUDA execution provider needs the `cuda` feature".to_string(),
             ));
         }
         builder

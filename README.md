@@ -24,6 +24,7 @@ in [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md).
 |---|---|
 | HTDemucs 4-stem separation, CPU | **Works.** Parity with PyTorch Demucs: max sample difference 1.2e-4 on synthetic input, equal median SDR on MUSDB18 test previews ([measurements](docs/MEASUREMENTS.md)). |
 | HTDemucs on the GPU (macOS, CoreML) | **Works** with the CoreML-target export (`coreml` feature): one CoreML partition, all nodes on the GPU. Output within 2e-6 of PyTorch. Separation 3x faster than the CPU path (5.6 s for a 193 s track); loading the compiled model costs 7 s per process. |
+| HTDemucs on the GPU (NVIDIA, CUDA) | **Works** on this fork with the in-graph export (`cuda` feature): all 1201 nodes on the CUDA EP, no CPU fallback. 214 ms per 7.8 s window against 2055 ms on the CPU (9.6x) on an RTX 4050 Laptop. See [FORK.md](FORK.md). |
 | Input: WAV, FLAC, MP3, OGG/Vorbis, AAC/M4A, ALAC, AIFF, CAF, MKV (Symphonia 0.6) | Works. Decoded samples are not clipped. Only WAV, FLAC and MP3 are exercised by tests or records. |
 | Output: WAV 16/24-bit int, 32-bit float; FLAC 16/24-bit | Works, round-trip tested. |
 | Resampling to the model rate (rubato) | Works, time-aligned (impulse tests). |
@@ -101,10 +102,12 @@ cargo run --release --example separate -- song.mp3 stems/ htdemucs_split.onnx --
 cargo run --release --features coreml --example separate -- song.mp3 stems/ htdemucs_split_coreml.onnx --split
 ```
 
-`--ep cpu|coreml|auto` picks the provider (default `auto`: CoreML if it
+`--ep cpu|coreml|cuda|auto` picks the provider (default `auto`: CoreML if it
 builds, else CPU). The first CoreML run compiles the model (about 30 s)
 into `coreml-cache/<model hash>/` next to the model file; later
-processes load it in about 7 s.
+processes load it in about 7 s. `cuda` needs the `cuda` feature and an
+NVIDIA GPU with CUDA/cuDNN; unlike the other two it never falls back to
+the CPU (see [FORK.md](FORK.md)).
 
 ### C. The `charon` binary and the resident server
 
@@ -238,11 +241,20 @@ The real-model regression test needs the model:
 CHARON_HTDEMUCS_MODEL=/path/to/htdemucs.onnx cargo test --release -- --ignored
 ```
 
+On this fork, run the same test with `--features cuda` to check the CUDA
+path (it builds the CPU session too, so both are covered by one build):
+
+```bash
+CHARON_HTDEMUCS_MODEL=/path/to/htdemucs.onnx \
+  cargo test --release --features cuda -- --ignored htdemucs
+```
+
 Features: `ort-backend` (default), `decode` (default; file reading with
 Symphonia), `aac` (default; Symphonia's AAC decoder), `coreml` (CoreML
-execution provider, macOS), `realtime` (CPAL input, experimental),
-`ep-experimental` (CoreML + WebGPU for `examples/ep_probe`). Without
-`decode` the library works on PCM buffers only.
+execution provider, macOS), `cuda` (CUDA execution provider, NVIDIA),
+`realtime` (CPAL input, experimental), `ep-experimental` (CoreML + WebGPU
+for `examples/ep_probe`). Without `decode` the library works on PCM
+buffers only.
 
 ## Repository layout
 

@@ -81,6 +81,10 @@ realtime = ["dep:cpal"]
 # Apple CoreML execution provider (macOS). Used by the split-transform
 # HTDemucs export; measured in docs/MEASUREMENTS.md.
 coreml = ["ort-backend", "ort/coreml", "dep:sha2"]
+# NVIDIA CUDA execution provider (Linux/Windows). The session refuses to fall
+# back to the CPU, so a graph the CUDA EP cannot take is an error rather than a
+# silent ninth-of-the-speed run; see `ExecutionProvider::Cuda`.
+cuda = ["ort-backend", "ort/cuda"]
 # GPU execution providers for measurement only (examples/ep_probe). Not a
 # supported path: see docs/MEASUREMENTS.md for what was measured.
 ep-experimental = ["coreml", "ort/webgpu"]

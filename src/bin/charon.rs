@@ -1,7 +1,7 @@
 //! `charon`: separate audio files, one-shot or through a resident server.
 //!
 //! ```text
-//! charon separate <input> [-o DIR] [--model FILE] [--format F] [--shifts N] [--ep cpu|coreml|auto] [--overlap F] [--blend triangle|uniform] [--no-server]
+//! charon separate <input> [-o DIR] [--model FILE] [--format F] [--shifts N] [--ep cpu|coreml|cuda|auto] [--overlap F] [--blend triangle|uniform] [--no-server]
 //! charon serve --model FILE [--socket PATH] [--ep ...]
 //! charon stop [--socket PATH]
 //! ```
@@ -71,6 +71,7 @@ fn parse_ep(name: &str) -> Result<ExecutionProvider, String> {
     Ok(match name {
         "cpu" => ExecutionProvider::Cpu,
         "coreml" => ExecutionProvider::CoreMl,
+        "cuda" => ExecutionProvider::Cuda,
         "auto" => ExecutionProvider::Auto,
         other => return Err(format!("unknown execution provider {other}")),
     })
@@ -353,7 +354,7 @@ fn separate(o: &Options) -> Result<(), String> {
 fn main() {
     env_logger_init();
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: charon separate <input> [-o DIR] [--model FILE] [--format wav16|wav24|wav32|flac16|flac24] [--shifts N] [--ep cpu|coreml|auto] [--overlap F] [--blend triangle|uniform] [--threads N] [--socket PATH] [--no-server]\n       charon serve --model FILE [--ep ...] [--socket PATH]\n       charon stop [--socket PATH]\n       charon ping [--socket PATH]";
+    let usage = "usage: charon separate <input> [-o DIR] [--model FILE] [--format wav16|wav24|wav32|flac16|flac24] [--shifts N] [--ep cpu|coreml|cuda|auto] [--overlap F] [--blend triangle|uniform] [--threads N] [--socket PATH] [--no-server]\n       charon serve --model FILE [--ep ...] [--socket PATH]\n       charon stop [--socket PATH]\n       charon ping [--socket PATH]";
     let result = match args.first().map(String::as_str) {
         Some("separate") => parse_args(&args[1..]).and_then(|o| separate(&o)),
         Some("serve") => parse_args(&args[1..]).and_then(|o| serve(&o)),
